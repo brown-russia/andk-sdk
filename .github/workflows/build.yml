@@ -1,0 +1,59 @@
+name: Build ByteTool APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: 'Прямая ссылка на ZIP проекта'
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Скачать ZIP проекта
+        run: |
+          curl -L "${{ github.event.inputs.zip_url }}" -o project.zip
+          unzip -q project.zip
+          # Ищем папку с build.gradle
+          PROJECT_DIR=$(find . -name "build.gradle" -not -path "*/app/*" | head -1 | xargs dirname)
+          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+          echo "Найден проект: $PROJECT_DIR"
+          ls "$PROJECT_DIR"
+
+      - name: Установить Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Установить Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Установить NDK и CMake
+        run: |
+          sdkmanager --install "ndk;27.2.12479018" "cmake;3.22.1" --sdk_root=$ANDROID_SDK_ROOT
+
+      - name: Сделать gradlew исполняемым
+        run: |
+          cd "$PROJECT_DIR"
+          if [ ! -f gradlew ]; then
+            gradle wrapper --gradle-version=8.2
+          fi
+          chmod +x gradlew
+
+      - name: Собрать APK
+        run: |
+          cd "$PROJECT_DIR"
+          ./gradlew assembleRelease --stacktrace
+
+      - name: Найти и загрузить APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ByteTool-release
+          path: |
+            **/build/outputs/apk/release/*.apk
+            **/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
