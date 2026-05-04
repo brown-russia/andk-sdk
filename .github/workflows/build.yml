@@ -75,6 +75,19 @@ jobs:
           ABIS="armeabi-v7a arm64-v8a x86 x86_64"
           ABIS_COMMAS="armeabi-v7a,arm64-v8a,x86,x86_64"
 
+          # Fix architecture specific issues on the fly
+          C_FILE=$(find . -name "enet_samp_hook_v11.c" -o -name "etr.c" | head -1)
+          if [ -n "$C_FILE" ]; then
+            echo "Patching $C_FILE for cross-architecture support..."
+            
+            # 1. Update POOL_TAG to be 32/64 bit safe
+            sed -i 's|#define POOL_TAG.*|#ifdef __LP64__\n#define POOL_TAG ((uintptr_t)1ULL << 63)\n#else\n#define POOL_TAG ((uintptr_t)1UL << 31)\n#endif|g' "$C_FILE"
+            
+            # 2. Make ENet structural static assertions conditionally compiled for 64-bit only
+            sed -i 's|_Static_assert(offsetof(ENetPacket, flags)|#ifdef __LP64__\n_Static_assert(offsetof(ENetPacket, flags)|g' "$C_FILE"
+            sed -i 's|_Static_assert(offsetof(ENetPacket, userData).*|_Static_assert(offsetof(ENetPacket, userData)     == 0x28, "ENetPacket.userData offset");\n#endif|g' "$C_FILE"
+          fi
+
           if [ -n "$GRADLE_FILE" ] && [ "$MODE" != "NDK" ]; then
             cd "$(dirname "$GRADLE_FILE")"
             echo "sdk.dir=$ANDROID_HOME" > local.properties
@@ -90,8 +103,6 @@ jobs:
             APP_MK=$(find "$MK_DIR" -name "Application.mk" | head -1)
             
             cd "$MK_DIR"
-            
-            # Automatic path correction for Android.mk
             sed -i 's|\.\./||g' "$MK_ABS_PATH"
             
             $ANDROID_NDK_HOME/ndk-build \
@@ -138,12 +149,17 @@ jobs:
             if [[ "$abi" =~ ^(armeabi-v7a|arm64-v8a|x86|x86_64)$ ]]; then
               mkdir -p "output/$abi"
               cp -f "$file" "output/$abi/"
+              echo "Collected: $file -> output/$abi/$(basename "$file")"
             fi
           done
           
           find extracted_project -type f \( -name "*.apk" -o -name "*.aar" \) | while read -r file; do
             cp -f "$file" output/
+            echo "Collected: $file -> output/$(basename "$file")"
           done
+          
+          echo "=== Output directory contents ==="
+          ls -R output
 
       - name: Upload results
         uses: actions/upload-artifact@v4
