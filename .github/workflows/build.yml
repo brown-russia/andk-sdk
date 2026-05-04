@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       zip_url:
-        description: 'Прямая ссылка на ZIP проекта'
+        description: 'Direct link to the ZIP project'
         required: true
         type: string
       build_type:
-        description: 'Тип проекта'
+        description: 'Project build type'
         required: true
         default: 'AUTO'
         type: choice
@@ -17,12 +17,12 @@ on:
           - 'GRADLE'
           - 'NDK'
       ndk_version:
-        description: 'Версия NDK'
+        description: 'NDK Version'
         required: true
         default: '25.2.9519653'
         type: string
       java_version:
-        description: 'Версия Java (для Gradle)'
+        description: 'Java Version'
         required: true
         default: '17'
         type: choice
@@ -33,23 +33,23 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Распаковка проекта
+      - name: Extract project
         run: |
           curl -L "${{ github.event.inputs.zip_url }}" -o project.zip
           unzip -q project.zip -d extracted_project
 
-      - name: Установка Java ${{ github.event.inputs.java_version }}
+      - name: Setup Java ${{ github.event.inputs.java_version }}
         uses: actions/setup-java@v4
         with:
           java-version: ${{ github.event.inputs.java_version }}
           distribution: 'temurin'
 
-      - name: Установка NDK
+      - name: Setup NDK
         run: |
           echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;${{ github.event.inputs.ndk_version }}" --sdk_root=$ANDROID_HOME
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${{ github.event.inputs.ndk_version }}" >> $GITHUB_ENV
 
-      - name: Выполнение сборки
+      - name: Execute build
         run: |
           cd extracted_project
           
@@ -61,11 +61,11 @@ jobs:
 
           if [ "$MODE" = "GRADLE" ]; then
             GRADLE_FILE=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" \) -not -path "*/app/*" | head -1)
-            if [ -z "$GRADLE_FILE" ]; then echo "Ошибка: Файлы Gradle не найдены"; exit 1; fi
+            if [ -z "$GRADLE_FILE" ]; then echo "Gradle files not found"; exit 1; fi
           elif [ "$MODE" = "NDK" ]; then
             MK_FILE=$(find . -name "Android.mk" | head -1)
             CMAKE_FILE=$(find . -name "CMakeLists.txt" | head -1)
-            if [ -z "$MK_FILE" ] && [ -z "$CMAKE_FILE" ]; then echo "Ошибка: Файлы NDK не найдены"; exit 1; fi
+            if [ -z "$MK_FILE" ] && [ -z "$CMAKE_FILE" ]; then echo "NDK files not found"; exit 1; fi
           else
             GRADLE_FILE=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" \) -not -path "*/app/*" | head -1)
             MK_FILE=$(find . -name "Android.mk" | head -1)
@@ -76,7 +76,6 @@ jobs:
           ABIS_COMMAS="armeabi-v7a,arm64-v8a,x86,x86_64"
 
           if [ -n "$GRADLE_FILE" ] && [ "$MODE" != "NDK" ]; then
-            echo "--- Сборка через Gradle ---"
             cd "$(dirname "$GRADLE_FILE")"
             echo "sdk.dir=$ANDROID_HOME" > local.properties
             echo "ndk.dir=$ANDROID_NDK_HOME" >> local.properties
@@ -85,20 +84,18 @@ jobs:
             ./gradlew assembleRelease assembleDebug -Pandroid.injected.build.abi="$ABIS_COMMAS" --stacktrace
 
           elif [ -n "$MK_FILE" ]; then
-            echo "--- Сборка через ndk-build ---"
             MK_ABS_PATH=$(realpath "$MK_FILE")
             MK_DIR=$(dirname "$MK_ABS_PATH")
             
             APP_MK=$(find "$MK_DIR" -name "Application.mk" | head -1)
             
-            # Переходим в папку с Android.mk
             cd "$MK_DIR"
             
-            # Принудительно задаем LOCAL_PATH как абсолютный путь текущей папки.
-            # Это исключает любые ошибки резолва относительных путей в самом NDK.
+            # Automatic path correction for Android.mk
+            sed -i 's|\.\./||g' "$MK_ABS_PATH"
+            
             $ANDROID_NDK_HOME/ndk-build \
               NDK_PROJECT_PATH=. \
-              LOCAL_PATH="$(pwd)" \
               APP_BUILD_SCRIPT="$MK_ABS_PATH" \
               NDK_APPLICATION_MK="$APP_MK" \
               APP_ABI="$ABIS" \
@@ -107,12 +104,10 @@ jobs:
               NDK_LIBS_OUT="./libs"
 
           elif [ -n "$CMAKE_FILE" ]; then
-            echo "--- Сборка через CMake ---"
             CMAKE_ABS_PATH=$(realpath "$CMAKE_FILE")
             CMAKE_DIR=$(dirname "$CMAKE_ABS_PATH")
             
             for abi in $ABIS; do
-              echo "Компиляция CMake для архитектуры: $abi"
               mkdir -p "build_$abi"
               cmake -S "$CMAKE_DIR" -B "build_$abi" \
                 -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
@@ -123,11 +118,10 @@ jobs:
             done
           fi
 
-      - name: Сбор артефактов
+      - name: Collect artifacts
         run: |
           mkdir -p output
           
-          # Находим все *.so файлы
           find extracted_project -type f -name "*.so" | while read -r file; do
             if [[ "$file" == *"/armeabi-v7a/"* ]]; then
               abi="armeabi-v7a"
@@ -144,20 +138,14 @@ jobs:
             if [[ "$abi" =~ ^(armeabi-v7a|arm64-v8a|x86|x86_64)$ ]]; then
               mkdir -p "output/$abi"
               cp -f "$file" "output/$abi/"
-              echo "Скопирован: $file -> output/$abi/$(basename "$file")"
             fi
           done
           
-          # Дополнительное сохранение APK и AAR для Gradle
           find extracted_project -type f \( -name "*.apk" -o -name "*.aar" \) | while read -r file; do
             cp -f "$file" output/
-            echo "Скопирован: $file -> output/$(basename "$file")"
           done
-          
-          echo "=== Итоговая структура папки output ==="
-          ls -R output
 
-      - name: Загрузка результата
+      - name: Upload results
         uses: actions/upload-artifact@v4
         with:
           name: compiled_libs
