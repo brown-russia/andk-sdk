@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       build_type:
-        description: 'Тип проекта (что собираем)'
+        description: 'Тип проекта'
         required: true
         default: 'AUTO'
         type: choice
@@ -53,33 +53,28 @@ jobs:
         run: |
           cd extracted_project
           
-          # Читаем выбор пользователя
           MODE="${{ github.event.inputs.build_type }}"
           
           GRADLE_FILE=""
           MK_FILE=""
           CMAKE_FILE=""
 
-          # Поиск файлов в зависимости от выбранного режима
           if [ "$MODE" = "GRADLE" ]; then
             GRADLE_FILE=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" \) -not -path "*/app/*" | head -1)
             if [ -z "$GRADLE_FILE" ]; then echo "Ошибка: Файлы Gradle не найдены"; exit 1; fi
           elif [ "$MODE" = "NDK" ]; then
             MK_FILE=$(find . -name "Android.mk" | head -1)
             CMAKE_FILE=$(find . -name "CMakeLists.txt" | head -1)
-            if [ -z "$MK_FILE" ] && [ -z "$CMAKE_FILE" ]; then echo "Ошибка: Файлы NDK (Android.mk или CMakeLists.txt) не найдены"; exit 1; fi
+            if [ -z "$MK_FILE" ] && [ -z "$CMAKE_FILE" ]; then echo "Ошибка: Файлы NDK не найдены"; exit 1; fi
           else
-            # Режим AUTO
             GRADLE_FILE=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" \) -not -path "*/app/*" | head -1)
             MK_FILE=$(find . -name "Android.mk" | head -1)
             CMAKE_FILE=$(find . -name "CMakeLists.txt" | head -1)
           fi
 
-          # 4 архитектуры для нативной сборки
           ABIS="armeabi-v7a arm64-v8a x86 x86_64"
           ABIS_COMMAS="armeabi-v7a,arm64-v8a,x86,x86_64"
 
-          # Приоритеты выполнения при AUTO
           if [ -n "$GRADLE_FILE" ] && [ "$MODE" != "NDK" ]; then
             echo "--- Сборка через Gradle ---"
             cd "$(dirname "$GRADLE_FILE")"
@@ -92,20 +87,25 @@ jobs:
           elif [ -n "$MK_FILE" ]; then
             echo "--- Сборка через ndk-build ---"
             MK_ABS_PATH=$(realpath "$MK_FILE")
-            PROJECT_ROOT=$(dirname "$MK_ABS_PATH")
-            if [ "$(basename "$PROJECT_ROOT")" = "jni" ]; then PROJECT_ROOT=$(dirname "$PROJECT_ROOT"); fi
             
-            APP_MK=$(find "$PROJECT_ROOT" -name "Application.mk" | head -1)
+            # Папка, где лежит Android.mk (например, extracted_project/etr)
+            MK_DIR=$(dirname "$MK_ABS_PATH")
+            
+            # Для разрешения относительного пути ../enet_samp_hook_v11.c
+            # выставляем NDK_PROJECT_PATH на уровень выше папки etr
+            PARENT_DIR=$(dirname "$MK_DIR")
+            
+            APP_MK=$(find "$MK_DIR" -name "Application.mk" | head -1)
             
             $ANDROID_NDK_HOME/ndk-build \
-              -C "$PROJECT_ROOT" \
-              NDK_PROJECT_PATH=. \
+              -C "$PARENT_DIR" \
+              NDK_PROJECT_PATH="$PARENT_DIR" \
               APP_BUILD_SCRIPT="$MK_ABS_PATH" \
               NDK_APPLICATION_MK="$APP_MK" \
               APP_ABI="$ABIS" \
               APP_PLATFORM=android-21 \
-              NDK_OUT="$PROJECT_ROOT/obj" \
-              NDK_LIBS_OUT="$PROJECT_ROOT/libs"
+              NDK_OUT="$MK_DIR/obj" \
+              NDK_LIBS_OUT="$MK_DIR/libs"
 
           elif [ -n "$CMAKE_FILE" ]; then
             echo "--- Сборка через CMake ---"
@@ -122,16 +122,13 @@ jobs:
                 -DCMAKE_BUILD_TYPE=Release
               cmake --build "build_$abi"
             done
-          else
-            echo "Ошибка: Не найден подходящий файл для сборки."
-            exit 1
           fi
 
       - name: Сбор артефактов
         run: |
           mkdir -p output
           
-          # Поиск .so библиотек и сохранение в папки по архитектурам
+          # Поиск .so библиотек по всем архитектурам
           find extracted_project -type f -name "*.so" | while read -r file; do
             if [[ "$file" == *"/armeabi-v7a/"* ]]; then
               abi="armeabi-v7a"
@@ -152,7 +149,7 @@ jobs:
             fi
           done
           
-          # Копирование APK и AAR для Gradle-сборок
+          # Копирование APK и AAR для Gradle
           find extracted_project -type f \( -name "*.apk" -o -name "*.aar" \) | while read -r file; do
             cp -f "$file" output/
             echo "Скопирован: $file -> output/$(basename "$file")"
