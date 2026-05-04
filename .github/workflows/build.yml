@@ -1,4 +1,4 @@
-name: Build ByteTool APK
+name: Universal Android & Native Builder
 
 on:
   workflow_dispatch:
@@ -7,26 +7,58 @@ on:
         description: 'Прямая ссылка на ZIP проекта'
         required: true
         type: string
+      ndk_version:
+        description: 'Версия NDK (по умолчанию r25c)'
+        required: true
+        default: '25.2.9519653'
+        type: string
+      cmake_version:
+        description: 'Версия CMake'
+        required: true
+        default: '3.22.1'
+        type: string
+      java_version:
+        description: 'Версия Java'
+        required: true
+        default: '17'
+        type: choice
+        options:
+          - '11'
+          - '17'
+          - '21'
+      abi_armeabi_v7a:
+        description: 'Собрать .so для armeabi-v7a'
+        type: boolean
+        default: true
+      abi_arm64_v8a:
+        description: 'Собрать .so для arm64-v8a'
+        type: boolean
+        default: true
+      abi_x86:
+        description: 'Собрать .so для x86'
+        type: boolean
+        default: false
+      abi_x86_64:
+        description: 'Собрать .so для x86_64'
+        type: boolean
+        default: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Скачать ZIP проекта
+      - name: Скачать и распаковать архив
         run: |
           curl -L "${{ github.event.inputs.zip_url }}" -o project.zip
-          unzip -q project.zip
-          # Ищем папку с build.gradle
-          PROJECT_DIR=$(find . -name "build.gradle" -not -path "*/app/*" | head -1 | xargs dirname)
-          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
-          echo "Найден проект: $PROJECT_DIR"
-          ls "$PROJECT_DIR"
+          unzip -q project.zip -d extracted_project
+          echo "Содержимое архива:"
+          ls -R extracted_project
 
-      - name: Установить Java 17
+      - name: Установить Java ${{ github.event.inputs.java_version }}
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: ${{ github.event.inputs.java_version }}
           distribution: 'temurin'
 
       - name: Установить Android SDK
@@ -34,26 +66,96 @@ jobs:
 
       - name: Установить NDK и CMake
         run: |
-          sdkmanager --install "ndk;27.2.12479018" "cmake;3.22.1" --sdk_root=$ANDROID_SDK_ROOT
+          yes | sdkmanager --install "ndk;${{ github.event.inputs.ndk_version }}" "cmake;${{ github.event.inputs.cmake_version }}" --sdk_root=$ANDROID_HOME
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${{ github.event.inputs.ndk_version }}" >> $GITHUB_ENV
 
-      - name: Сделать gradlew исполняемым
+      - name: Настроить архитектуры (ABIs) для автономной сборки
         run: |
-          cd "$PROJECT_DIR"
-          if [ ! -f gradlew ]; then
-            gradle wrapper --gradle-version=8.2
+          ABIS=""
+          if [ "${{ github.event.inputs.abi_armeabi_v7a }}" = "true" ]; then ABIS="$ABIS armeabi-v7a"; fi
+          if [ "${{ github.event.inputs.abi_arm64_v8a }}" = "true" ]; then ABIS="$ABIS arm64-v8a"; fi
+          if [ "${{ github.event.inputs.abi_x86 }}" = "true" ]; then ABIS="$ABIS x86"; fi
+          if [ "${{ github.event.inputs.abi_x86_64 }}" = "true" ]; then ABIS="$ABIS x86_64"; fi
+          ABIS=$(echo $ABIS | xargs)
+          echo "SELECTED_ABIS=$ABIS" >> $GITHUB_ENV
+
+      - name: Определение типа проекта и сборка
+        run: |
+          cd extracted_project
+          
+          # Проверяем наличие Gradle проекта
+          GRADLE_FILE=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" \) -not -path "*/app/*" | head -1)
+          
+          if [ -n "$GRADLE_FILE" ]; then
+            PROJECT_DIR=$(dirname "$GRADLE_FILE")
+            echo "Обнаружен Gradle проект в директории: $PROJECT_DIR"
+            cd "$PROJECT_DIR"
+            
+            # Настройка local.properties
+            echo "sdk.dir=$ANDROID_HOME" > local.properties
+            echo "ndk.dir=$ANDROID_NDK_HOME" >> local.properties
+            echo "cmake.dir=$ANDROID_HOME/cmake/${{ github.event.inputs.cmake_version }}" >> local.properties
+            
+            # Генерация обертки при необходимости
+            if [ ! -f gradlew ]; then
+              gradle wrapper --gradle-version=8.2
+            fi
+            chmod +x gradlew
+            
+            # Сборка Gradle (автоматически соберет APK, AAR и .so внутри них)
+            ./gradlew assembleRelease assembleDebug --stacktrace
+          else
+            echo "Gradle не найден. Запуск прямой компиляции .so файлов..."
+            
+            # Поиск Android.mk или CMakeLists.txt
+            MK_FILE=$(find . -name "Android.mk" | head -1)
+            CMAKE_FILE=$(find . -name "CMakeLists.txt" | head -1)
+            
+            if [ -n "$MK_FILE" ]; then
+              echo "Используется ndk-build"
+              MK_DIR=$(dirname "$MK_FILE")
+              cd "$MK_DIR"
+              if [ "$(basename "$MK_DIR")" = "jni" ]; then cd ..; fi
+              $ANDROID_NDK_HOME/ndk-build NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=$MK_FILE APP_ABI="$SELECTED_ABIS" NDK_OUT=./obj NDK_LIBS_OUT=./libs
+            elif [ -n "$CMAKE_FILE" ]; then
+              echo "Используется CMake"
+              CMAKE_DIR=$(dirname "$CMAKE_FILE")
+              for abi in $SELECTED_ABIS; do
+                echo "Сборка CMake для архитектуры: $abi"
+                mkdir -p build_$abi
+                cmake -S "$CMAKE_DIR" -B build_$abi \
+                  -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+                  -DANDROID_ABI=$abi \
+                  -DANDROID_NDK=$ANDROID_NDK_HOME \
+                  -DCMAKE_BUILD_TYPE=Release
+                cmake --build build_$abi
+              done
+            else
+              echo "Ошибка: В архиве не найдены файлы сборки (build.gradle, Android.mk, CMakeLists.txt)"
+              exit 1
+            fi
           fi
-          chmod +x gradlew
 
-      - name: Собрать APK
+      - name: Сбор и подготовка артефактов
         run: |
-          cd "$PROJECT_DIR"
-          ./gradlew assembleRelease --stacktrace
+          mkdir -p output_artifacts
+          
+          # 1. Извлекаем APK
+          find extracted_project -name "*.apk" -exec cp {} output_artifacts/ \;
+          
+          # 2. Извлекаем AAR и JAR
+          find extracted_project -name "*.aar" -o -name "*.jar" -exec cp {} output_artifacts/ \;
+          
+          # 3. Извлекаем отдельно собранные .so файлы
+          # Ищем их как в Gradle intermediates, так и в результатах ndk-build/cmake
+          find extracted_project -name "*.so" -exec cp --parents {} output_artifacts/ \;
+          
+          echo "Итоговые файлы для выгрузки:"
+          ls -R output_artifacts
 
-      - name: Найти и загрузить APK
+      - name: Загрузить собранные артефакты
         uses: actions/upload-artifact@v4
         with:
-          name: ByteTool-release
-          path: |
-            **/build/outputs/apk/release/*.apk
-            **/build/outputs/apk/debug/*.apk
+          name: All-Compiled-Artifacts
+          path: output_artifacts/
           if-no-files-found: warn
