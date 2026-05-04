@@ -89,12 +89,13 @@ jobs:
             MK_ABS_PATH=$(realpath "$MK_FILE")
             MK_DIR=$(dirname "$MK_ABS_PATH")
             
-            # Находим Application.mk в папке с Android.mk
             APP_MK=$(find "$MK_DIR" -name "Application.mk" | head -1)
             
-            # Запускаем сборку прямо из папки, где лежит Android.mk.
-            # Мы принудительно передаем LOCAL_PATH=$(pwd), чтобы NDK не запутался в путях.
+            # Переходим в папку с Android.mk
             cd "$MK_DIR"
+            
+            # Принудительно задаем LOCAL_PATH как абсолютный путь текущей папки.
+            # Это исключает любые ошибки резолва относительных путей в самом NDK.
             $ANDROID_NDK_HOME/ndk-build \
               NDK_PROJECT_PATH=. \
               LOCAL_PATH="$(pwd)" \
@@ -126,7 +127,7 @@ jobs:
         run: |
           mkdir -p output
           
-          # Поиск .so файлов и сохранение в папки по архитектурам
+          # Находим все *.so файлы
           find extracted_project -type f -name "*.so" | while read -r file; do
             if [[ "$file" == *"/armeabi-v7a/"* ]]; then
               abi="armeabi-v7a"
@@ -147,7 +148,7 @@ jobs:
             fi
           done
           
-          # Копирование APK и AAR для Gradle
+          # Дополнительное сохранение APK и AAR для Gradle
           find extracted_project -type f \( -name "*.apk" -o -name "*.aar" \) | while read -r file; do
             cp -f "$file" output/
             echo "Скопирован: $file -> output/$(basename "$file")"
