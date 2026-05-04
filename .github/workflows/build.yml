@@ -4,154 +4,166 @@ on:
   workflow_dispatch:
     inputs:
       zip_url:
-        description: 'Direct URL to the project ZIP archive'
+        description: 'Прямая ссылка на ZIP проекта'
         required: true
         type: string
+      build_type:
+        description: 'Тип проекта (что собираем)'
+        required: true
+        default: 'AUTO'
+        type: choice
+        options:
+          - 'AUTO'
+          - 'GRADLE'
+          - 'NDK'
       ndk_version:
-        description: 'NDK version'
+        description: 'Версия NDK'
         required: true
         default: '25.2.9519653'
         type: string
       java_version:
-        description: 'Java version'
+        description: 'Версия Java (для Gradle)'
         required: true
         default: '17'
         type: choice
         options: ['11', '17', '21']
-      abi_armeabi_v7a:
-        description: 'Build for armeabi-v7a'
-        type: boolean
-        default: true
-      abi_arm64_v8a:
-        description: 'Build for arm64-v8a'
-        type: boolean
-        default: true
-      abi_x86:
-        description: 'Build for x86'
-        type: boolean
-        default: true
-      abi_x86_64:
-        description: 'Build for x86_64'
-        type: boolean
-        default: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Extract Project
+      - name: Распаковка проекта
         run: |
           curl -L "${{ github.event.inputs.zip_url }}" -o project.zip
           unzip -q project.zip -d extracted_project
 
-      - name: Set Up Java ${{ github.event.inputs.java_version }}
+      - name: Установка Java ${{ github.event.inputs.java_version }}
         uses: actions/setup-java@v4
         with:
           java-version: ${{ github.event.inputs.java_version }}
           distribution: 'temurin'
 
-      - name: Install Android NDK
+      - name: Установка NDK
         run: |
           echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;${{ github.event.inputs.ndk_version }}" --sdk_root=$ANDROID_HOME
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${{ github.event.inputs.ndk_version }}" >> $GITHUB_ENV
 
-      - name: Build
+      - name: Выполнение сборки
         run: |
           cd extracted_project
+          
+          # Читаем выбор пользователя
+          MODE="${{ github.event.inputs.build_type }}"
+          
+          GRADLE_FILE=""
+          MK_FILE=""
+          CMAKE_FILE=""
 
-          ABIS=""
-          if [ "${{ github.event.inputs.abi_armeabi_v7a }}" = "true" ]; then ABIS="$ABIS armeabi-v7a"; fi
-          if [ "${{ github.event.inputs.abi_arm64_v8a }}" = "true" ]; then ABIS="$ABIS arm64-v8a"; fi
-          if [ "${{ github.event.inputs.abi_x86 }}" = "true" ]; then ABIS="$ABIS x86"; fi
-          if [ "${{ github.event.inputs.abi_x86_64 }}" = "true" ]; then ABIS="$ABIS x86_64"; fi
-
-          ABIS_COMMAS=$(echo $ABIS | xargs | tr ' ' ',')
-          ABIS_SPACES=$(echo $ABIS | xargs)
-
-          if [ -f "settings.gradle" ] || [ -f "settings.gradle.kts" ]; then
-            echo "sdk.dir=$ANDROID_HOME" > local.properties
-            echo "ndk.dir=$ANDROID_NDK_HOME" >> local.properties
-
-            if [ ! -f gradlew ]; then gradle wrapper --gradle-version=8.2; fi
-            chmod +x gradlew
-
-            ./gradlew assembleRelease assembleDebug \
-              -Pandroid.injected.build.abi="$ABIS_COMMAS" \
-              --stacktrace || true
+          # Поиск файлов в зависимости от выбранного режима
+          if [ "$MODE" = "GRADLE" ]; then
+            GRADLE_FILE=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" \) -not -path "*/app/*" | head -1)
+            if [ -z "$GRADLE_FILE" ]; then echo "Ошибка: Файлы Gradle не найдены"; exit 1; fi
+          elif [ "$MODE" = "NDK" ]; then
+            MK_FILE=$(find . -name "Android.mk" | head -1)
+            CMAKE_FILE=$(find . -name "CMakeLists.txt" | head -1)
+            if [ -z "$MK_FILE" ] && [ -z "$CMAKE_FILE" ]; then echo "Ошибка: Файлы NDK (Android.mk или CMakeLists.txt) не найдены"; exit 1; fi
           else
-            find . -type f \( -name "build.gradle" -o -name "build.gradle.kts" \) | while read gradle_file; do
-              PROJECT_DIR=$(dirname "$gradle_file")
-              cd "$PROJECT_DIR"
-
-              echo "sdk.dir=$ANDROID_HOME" > local.properties
-              echo "ndk.dir=$ANDROID_NDK_HOME" >> local.properties
-
-              if [ ! -f gradlew ]; then gradle wrapper --gradle-version=8.2; fi
-              chmod +x gradlew
-
-              ./gradlew assembleRelease assembleDebug \
-                -Pandroid.injected.build.abi="$ABIS_COMMAS" \
-                --stacktrace || true
-
-              cd - > /dev/null
-            done
+            # Режим AUTO
+            GRADLE_FILE=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" \) -not -path "*/app/*" | head -1)
+            MK_FILE=$(find . -name "Android.mk" | head -1)
+            CMAKE_FILE=$(find . -name "CMakeLists.txt" | head -1)
           fi
 
-          find . -name "Android.mk" | while read mk_file; do
-            MK_ABS_PATH=$(realpath "$mk_file")
+          # 4 архитектуры для нативной сборки
+          ABIS="armeabi-v7a arm64-v8a x86 x86_64"
+          ABIS_COMMAS="armeabi-v7a,arm64-v8a,x86,x86_64"
+
+          # Приоритеты выполнения при AUTO
+          if [ -n "$GRADLE_FILE" ] && [ "$MODE" != "NDK" ]; then
+            echo "--- Сборка через Gradle ---"
+            cd "$(dirname "$GRADLE_FILE")"
+            echo "sdk.dir=$ANDROID_HOME" > local.properties
+            echo "ndk.dir=$ANDROID_NDK_HOME" >> local.properties
+            if [ ! -f gradlew ]; then gradle wrapper --gradle-version=8.2; fi
+            chmod +x gradlew
+            ./gradlew assembleRelease assembleDebug -Pandroid.injected.build.abi="$ABIS_COMMAS" --stacktrace
+
+          elif [ -n "$MK_FILE" ]; then
+            echo "--- Сборка через ndk-build ---"
+            MK_ABS_PATH=$(realpath "$MK_FILE")
             PROJECT_ROOT=$(dirname "$MK_ABS_PATH")
-
-            if [ "$(basename "$PROJECT_ROOT")" = "jni" ]; then
-              PROJECT_ROOT=$(dirname "$PROJECT_ROOT")
-            fi
-
+            if [ "$(basename "$PROJECT_ROOT")" = "jni" ]; then PROJECT_ROOT=$(dirname "$PROJECT_ROOT"); fi
+            
             APP_MK=$(find "$PROJECT_ROOT" -name "Application.mk" | head -1)
-
+            
             $ANDROID_NDK_HOME/ndk-build \
               -C "$PROJECT_ROOT" \
               NDK_PROJECT_PATH=. \
               APP_BUILD_SCRIPT="$MK_ABS_PATH" \
               NDK_APPLICATION_MK="$APP_MK" \
-              APP_ABI="$ABIS_SPACES" \
+              APP_ABI="$ABIS" \
               APP_PLATFORM=android-21 \
               NDK_OUT="$PROJECT_ROOT/obj" \
-              NDK_LIBS_OUT="$PROJECT_ROOT/libs" || true
-          done
+              NDK_LIBS_OUT="$PROJECT_ROOT/libs"
 
-          find . -name "CMakeLists.txt" | while read cmake_file; do
-            CMAKE_DIR=$(dirname "$(realpath "$cmake_file")")
-
-            for abi in $ABIS_SPACES; do
-              BUILD_DIR="$CMAKE_DIR/build_$abi"
-              mkdir -p "$BUILD_DIR"
-
-              cmake -S "$CMAKE_DIR" -B "$BUILD_DIR" \
+          elif [ -n "$CMAKE_FILE" ]; then
+            echo "--- Сборка через CMake ---"
+            CMAKE_ABS_PATH=$(realpath "$CMAKE_FILE")
+            CMAKE_DIR=$(dirname "$CMAKE_ABS_PATH")
+            
+            for abi in $ABIS; do
+              echo "Компиляция CMake для архитектуры: $abi"
+              mkdir -p "build_$abi"
+              cmake -S "$CMAKE_DIR" -B "build_$abi" \
                 -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
                 -DANDROID_ABI=$abi \
                 -DANDROID_PLATFORM=android-21 \
-                -DCMAKE_BUILD_TYPE=Release || true
-
-              cmake --build "$BUILD_DIR" || true
+                -DCMAKE_BUILD_TYPE=Release
+              cmake --build "build_$abi"
             done
-          done
-
-          if ! find . \( -name "build.gradle*" -o -name "Android.mk" -o -name "CMakeLists.txt" \) | grep -q .; then
-            echo "No supported build system detected"
+          else
+            echo "Ошибка: Не найден подходящий файл для сборки."
+            exit 1
           fi
 
-      - name: Collect Artifacts
+      - name: Сбор артефактов
         run: |
           mkdir -p output
-          find extracted_project -name "*.apk" -o -name "*.aar" -o -name "*.so" | while read file; do
-            dest="output/$(echo "$file" | sed 's|extracted_project/||')"
-            mkdir -p "$(dirname "$dest")"
-            cp "$file" "$dest"
+          
+          # Поиск .so библиотек и сохранение в папки по архитектурам
+          find extracted_project -type f -name "*.so" | while read -r file; do
+            if [[ "$file" == *"/armeabi-v7a/"* ]]; then
+              abi="armeabi-v7a"
+            elif [[ "$file" == *"/arm64-v8a/"* ]]; then
+              abi="arm64-v8a"
+            elif [[ "$file" == *"/x86/"* ]]; then
+              abi="x86"
+            elif [[ "$file" == *"/x86_64/"* ]]; then
+              abi="x86_64"
+            else
+              abi=$(basename "$(dirname "$file")" | sed 's/build_//')
+            fi
+            
+            if [[ "$abi" =~ ^(armeabi-v7a|arm64-v8a|x86|x86_64)$ ]]; then
+              mkdir -p "output/$abi"
+              cp -f "$file" "output/$abi/"
+              echo "Скопирован: $file -> output/$abi/$(basename "$file")"
+            fi
           done
+          
+          # Копирование APK и AAR для Gradle-сборок
+          find extracted_project -type f \( -name "*.apk" -o -name "*.aar" \) | while read -r file; do
+            cp -f "$file" output/
+            echo "Скопирован: $file -> output/$(basename "$file")"
+          done
+          
+          echo "=== Итоговая структура папки output ==="
+          ls -R output
 
-      - name: Upload Build Output
+      - name: Загрузка результата
         uses: actions/upload-artifact@v4
         with:
-          name: Build-Output
+          name: compiled_libs
           path: output/
           if-no-files-found: error
