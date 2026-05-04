@@ -1,4 +1,4 @@
-name: Universal Android & Native Builder
+name: Universal Android Builder (API 21-35+)
 
 on:
   workflow_dispatch:
@@ -8,115 +8,131 @@ on:
         required: true
         type: string
       ndk_version:
-        description: 'Версия NDK (по умолчанию r25c)'
+        description: 'Версия NDK'
         required: true
         default: '25.2.9519653'
-        type: string
-      cmake_version:
-        description: 'Версия CMake'
-        required: true
-        default: '3.22.1'
         type: string
       java_version:
         description: 'Версия Java'
         required: true
         default: '17'
         type: choice
-        options:
-          - '11'
-          - '17'
-          - '21'
+        options: ['11', '17', '21']
       abi_armeabi_v7a:
-        description: 'Собрать .so для armeabi-v7a'
+        description: 'Собрать для armeabi-v7a'
         type: boolean
         default: true
       abi_arm64_v8a:
-        description: 'Собрать .so для arm64-v8a'
+        description: 'Собрать для arm64-v8a'
         type: boolean
         default: true
+      abi_x86:
+        description: 'Собрать для x86'
+        type: boolean
+        default: false
+      abi_x86_64:
+        description: 'Собрать для x86_64'
+        type: boolean
+        default: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Подготовка окружения
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zip unzip curl
+
       - name: Скачать и распаковать архив
         run: |
           curl -L "${{ github.event.inputs.zip_url }}" -o project.zip
           unzip -q project.zip -d extracted_project
 
-      - name: Установить Java ${{ github.event.inputs.java_version }}
+      - name: Установка Java ${{ github.event.inputs.java_version }}
         uses: actions/setup-java@v4
         with:
           java-version: ${{ github.event.inputs.java_version }}
           distribution: 'temurin'
 
-      - name: Установить Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Установить NDK и CMake
+      - name: Установка Android SDK и NDK
         run: |
-          yes | sdkmanager --install "ndk;${{ github.event.inputs.ndk_version }}" "cmake;${{ github.event.inputs.cmake_version }}" --sdk_root=$ANDROID_HOME
+          yes | sdkmanager --install "ndk;${{ github.event.inputs.ndk_version }}" --sdk_root=$ANDROID_HOME
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${{ github.event.inputs.ndk_version }}" >> $GITHUB_ENV
+
+      - name: Формирование списка ABI
+        run: |
+          ABIS=""
+          if [ "${{ github.event.inputs.abi_armeabi_v7a }}" = "true" ]; then ABIS="$ABIS armeabi-v7a"; fi
+          if [ "${{ github.event.inputs.abi_arm64_v8a }}" = "true" ]; then ABIS="$ABIS arm64-v8a"; fi
+          if [ "${{ github.event.inputs.abi_x86 }}" = "true" ]; then ABIS="$ABIS x86"; fi
+          if [ "${{ github.event.inputs.abi_x86_64 }}" = "true" ]; then ABIS="$ABIS x86_64"; fi
+          echo "SELECTED_ABIS=$(echo $ABIS | xargs | tr ' ' ',')" >> $GITHUB_ENV
 
       - name: Сборка проекта
         run: |
           cd extracted_project
           
-          # Глубокий поиск Gradle
+          # Поиск файлов конфигурации
           GRADLE_FILE=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" \) -not -path "*/app/*" | head -1)
-          
-          # Глубокий поиск Native файлов
           MK_FILE=$(find . -name "Android.mk" | head -1)
           CMAKE_FILE=$(find . -name "CMakeLists.txt" | head -1)
 
           if [ -n "$GRADLE_FILE" ]; then
-            echo "Найден Gradle проект"
+            echo "--- Сборка через Gradle ---"
             cd "$(dirname "$GRADLE_FILE")"
             echo "sdk.dir=$ANDROID_HOME" > local.properties
             echo "ndk.dir=$ANDROID_NDK_HOME" >> local.properties
             if [ ! -f gradlew ]; then gradle wrapper --gradle-version=8.2; fi
             chmod +x gradlew
-            ./gradlew assembleRelease assembleDebug --stacktrace
-          
+            ./gradlew assembleRelease --stacktrace
+
           elif [ -n "$MK_FILE" ]; then
-            echo "Найден ndk-build проект"
-            ABIS=""
-            if [ "${{ github.event.inputs.abi_armeabi_v7a }}" = "true" ]; then ABIS="$ABIS armeabi-v7a"; fi
-            if [ "${{ github.event.inputs.abi_arm64_v8a }}" = "true" ]; then ABIS="$ABIS arm64-v8a"; fi
+            echo "--- Сборка через ndk-build ---"
+            # Определяем корень для ndk-build (родитель папки jni или папка с .mk)
+            MK_ABS_PATH=$(realpath "$MK_FILE")
+            PROJECT_ROOT=$(dirname "$MK_ABS_PATH")
+            if [ "$(basename "$PROJECT_ROOT")" = "jni" ]; then PROJECT_ROOT=$(dirname "$PROJECT_ROOT"); fi
             
-            MK_DIR=$(dirname "$MK_FILE")
-            REAL_MK_FILE=$(realpath "$MK_FILE")
-            cd "$MK_DIR"
-            # Если файл внутри jni/, выходим на уровень выше для ndk-build
-            if [ "$(basename "$PWD")" = "jni" ]; then cd ..; fi
-            $ANDROID_NDK_HOME/ndk-build NDK_PROJECT_PATH=. APP_BUILD_SCRIPT="$REAL_MK_FILE" APP_ABI="$ABIS" NDK_OUT=./obj NDK_LIBS_OUT=./libs
-          
+            # Запуск из корня проекта для корректной работы путей ../
+            $ANDROID_NDK_HOME/ndk-build \
+              -C "$PROJECT_ROOT" \
+              APP_BUILD_SCRIPT="$MK_ABS_PATH" \
+              APP_ABI="${SELECTED_ABIS//,/ }" \
+              APP_PLATFORM=android-21 \
+              NDK_OUT="$PROJECT_ROOT/obj" \
+              NDK_LIBS_OUT="$PROJECT_ROOT/libs"
+
           elif [ -n "$CMAKE_FILE" ]; then
-            echo "Найден CMake проект"
-            CMAKE_DIR=$(dirname "$CMAKE_FILE")
-            ABIS=""
-            if [ "${{ github.event.inputs.abi_armeabi_v7a }}" = "true" ]; then ABIS="$ABIS armeabi-v7a"; fi
-            if [ "${{ github.event.inputs.abi_arm64_v8a }}" = "true" ]; then ABIS="$ABIS arm64-v8a"; fi
-            
-            for abi in $ABIS; do
+            echo "--- Сборка через CMake ---"
+            CMAKE_ABS_PATH=$(realpath "$CMAKE_FILE")
+            CMAKE_DIR=$(dirname "$CMAKE_ABS_PATH")
+            IFS=',' read -ra ADDR <<< "$SELECTED_ABIS"
+            for abi in "${ADDR[@]}"; do
               mkdir -p "build_$abi"
               cmake -S "$CMAKE_DIR" -B "build_$abi" \
                 -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
                 -DANDROID_ABI=$abi \
-                -DANDROID_NDK=$ANDROID_NDK_HOME \
+                -DANDROID_PLATFORM=android-21 \
                 -DCMAKE_BUILD_TYPE=Release
               cmake --build "build_$abi"
             done
           fi
 
-      - name: Сбор артефактов
+      - name: Поиск и упаковка результатов
         run: |
           mkdir -p output
-          find extracted_project -name "*.apk" -o -name "*.aar" -o -name "*.so" -exec cp --parents {} output/ \;
+          # Сбор всех APK, AAR и отдельно скомпилированных .so библиотек
+          find extracted_project -name "*.apk" -o -name "*.aar" -o -name "*.so" | while read file; do
+            dest="output/$(echo "$file" | sed 's|extracted_project/||')"
+            mkdir -p "$(dirname "$dest")"
+            cp "$file" "$dest"
+          done
 
-      - name: Загрузить результат
+      - name: Выгрузка артефактов
         uses: actions/upload-artifact@v4
         with:
-          name: Build-Result
+          name: Build-Result-Android-5-Plus
           path: output/
+          if-no-files-found: error
