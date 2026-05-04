@@ -87,25 +87,23 @@ jobs:
           elif [ -n "$MK_FILE" ]; then
             echo "--- Сборка через ndk-build ---"
             MK_ABS_PATH=$(realpath "$MK_FILE")
-            
-            # Папка, где лежит Android.mk (например, extracted_project/etr)
             MK_DIR=$(dirname "$MK_ABS_PATH")
             
-            # Для разрешения относительного пути ../enet_samp_hook_v11.c
-            # выставляем NDK_PROJECT_PATH на уровень выше папки etr
-            PARENT_DIR=$(dirname "$MK_DIR")
-            
+            # Находим Application.mk в папке с Android.mk
             APP_MK=$(find "$MK_DIR" -name "Application.mk" | head -1)
             
+            # Запускаем сборку прямо из папки, где лежит Android.mk.
+            # Мы принудительно передаем LOCAL_PATH=$(pwd), чтобы NDK не запутался в путях.
+            cd "$MK_DIR"
             $ANDROID_NDK_HOME/ndk-build \
-              -C "$PARENT_DIR" \
-              NDK_PROJECT_PATH="$PARENT_DIR" \
+              NDK_PROJECT_PATH=. \
+              LOCAL_PATH="$(pwd)" \
               APP_BUILD_SCRIPT="$MK_ABS_PATH" \
               NDK_APPLICATION_MK="$APP_MK" \
               APP_ABI="$ABIS" \
               APP_PLATFORM=android-21 \
-              NDK_OUT="$MK_DIR/obj" \
-              NDK_LIBS_OUT="$MK_DIR/libs"
+              NDK_OUT="./obj" \
+              NDK_LIBS_OUT="./libs"
 
           elif [ -n "$CMAKE_FILE" ]; then
             echo "--- Сборка через CMake ---"
@@ -128,7 +126,7 @@ jobs:
         run: |
           mkdir -p output
           
-          # Поиск .so библиотек по всем архитектурам
+          # Поиск .so файлов и сохранение в папки по архитектурам
           find extracted_project -type f -name "*.so" | while read -r file; do
             if [[ "$file" == *"/armeabi-v7a/"* ]]; then
               abi="armeabi-v7a"
