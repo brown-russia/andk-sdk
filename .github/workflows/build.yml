@@ -72,21 +72,9 @@ jobs:
             CMAKE_FILE=$(find . -name "CMakeLists.txt" | head -1)
           fi
 
-          ABIS="armeabi-v7a arm64-v8a x86 x86_64"
-          ABIS_COMMAS="armeabi-v7a,arm64-v8a,x86,x86_64"
-
-          # Fix architecture specific issues on the fly
-          C_FILE=$(find . -name "enet_samp_hook_v11.c" -o -name "etr.c" | head -1)
-          if [ -n "$C_FILE" ]; then
-            echo "Patching $C_FILE for cross-architecture support..."
-            
-            # 1. Update POOL_TAG to be 32/64 bit safe
-            sed -i 's|#define POOL_TAG.*|#ifdef __LP64__\n#define POOL_TAG ((uintptr_t)1ULL << 63)\n#else\n#define POOL_TAG ((uintptr_t)1UL << 31)\n#endif|g' "$C_FILE"
-            
-            # 2. Make ENet structural static assertions conditionally compiled for 64-bit only
-            sed -i 's|_Static_assert(offsetof(ENetPacket, flags)|#ifdef __LP64__\n_Static_assert(offsetof(ENetPacket, flags)|g' "$C_FILE"
-            sed -i 's|_Static_assert(offsetof(ENetPacket, userData).*|_Static_assert(offsetof(ENetPacket, userData)     == 0x28, "ENetPacket.userData offset");\n#endif|g' "$C_FILE"
-          fi
+          # ── FIX: только ARM-архитектуры, shadowhook не поддерживает x86/x86_64 ──
+          ABIS="armeabi-v7a arm64-v8a"
+          ABIS_COMMAS="armeabi-v7a,arm64-v8a"
 
           if [ -n "$GRADLE_FILE" ] && [ "$MODE" != "NDK" ]; then
             cd "$(dirname "$GRADLE_FILE")"
