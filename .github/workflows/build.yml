@@ -52,9 +52,9 @@ jobs:
       - name: Execute build
         run: |
           cd extracted_project
-
+          
           MODE="${{ github.event.inputs.build_type }}"
-
+          
           GRADLE_FILE=""
           MK_FILE=""
           CMAKE_FILE=""
@@ -86,12 +86,12 @@ jobs:
           elif [ -n "$MK_FILE" ]; then
             MK_ABS_PATH=$(realpath "$MK_FILE")
             MK_DIR=$(dirname "$MK_ABS_PATH")
-
+            
             APP_MK=$(find "$MK_DIR" -name "Application.mk" | head -1)
-
+            
             cd "$MK_DIR"
             sed -i 's|\.\./||g' "$MK_ABS_PATH"
-
+            
             $ANDROID_NDK_HOME/ndk-build \
               NDK_PROJECT_PATH=. \
               APP_BUILD_SCRIPT="$MK_ABS_PATH" \
@@ -101,15 +101,10 @@ jobs:
               NDK_OUT="./obj" \
               NDK_LIBS_OUT="./libs"
 
-            echo "=== Compiled libs ==="
-            find ./libs -name "*.so" | while read f; do
-              echo "$f: $(readelf -h $f 2>/dev/null | grep Type || echo 'not ELF')"
-            done
-
           elif [ -n "$CMAKE_FILE" ]; then
             CMAKE_ABS_PATH=$(realpath "$CMAKE_FILE")
             CMAKE_DIR=$(dirname "$CMAKE_ABS_PATH")
-
+            
             for abi in $ABIS; do
               mkdir -p "build_$abi"
               cmake -S "$CMAKE_DIR" -B "build_$abi" \
@@ -124,38 +119,36 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p output
-
-          find extracted_project -path "*/libs/*" -type f -name "*.so" | while read -r file; do
+          
+          find extracted_project -type f -name "*.so" \
+            -not -path "*/obj/*" \
+            | while read -r file; do
             if [[ "$file" == *"/armeabi-v7a/"* ]]; then
               abi="armeabi-v7a"
             elif [[ "$file" == *"/arm64-v8a/"* ]]; then
               abi="arm64-v8a"
+            elif [[ "$file" == *"/x86/"* ]]; then
+              abi="x86"
+            elif [[ "$file" == *"/x86_64/"* ]]; then
+              abi="x86_64"
             else
-              continue
+              abi=$(basename "$(dirname "$file")" | sed 's/build_//')
             fi
-
-            if [[ "$file" == *"/prebuilt/"* ]]; then
-              echo "Skipping prebuilt: $file"
-              continue
+            
+            if [[ "$abi" =~ ^(armeabi-v7a|arm64-v8a|x86|x86_64)$ ]]; then
+              mkdir -p "output/$abi"
+              cp -f "$file" "output/$abi/"
+              echo "Collected: $file -> output/$abi/$(basename "$file")"
             fi
-
-            mkdir -p "output/$abi"
-            cp -f "$file" "output/$abi/"
-            echo "Collected: $file -> output/$abi/$(basename "$file")"
           done
-
+          
           find extracted_project -type f \( -name "*.apk" -o -name "*.aar" \) | while read -r file; do
             cp -f "$file" output/
             echo "Collected: $file -> output/$(basename "$file")"
           done
-
+          
           echo "=== Output directory contents ==="
           ls -R output
-
-          echo "=== ELF types ==="
-          find output -name "*.so" | while read f; do
-            echo "$f: $(readelf -h $f 2>/dev/null | grep 'Type:' || echo 'not ELF')"
-          done
 
       - name: Upload results
         uses: actions/upload-artifact@v4
