@@ -33,11 +33,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Extract project
-        run: |
-          curl -L "${{ github.event.inputs.zip_url }}" -o project.zip
-          unzip -q project.zip -d extracted_project
-
+      - name: Extract
+        run: python3 -m zipfile -e project.zip . 
       - name: Setup Java ${{ github.event.inputs.java_version }}
         uses: actions/setup-java@v4
         with:
